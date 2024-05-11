@@ -58,24 +58,37 @@ const heapPop = () => {
 module.exports = (logSources, printer) => {
   return new Promise(async (resolve, reject) => {
 
-    const syncedSources = []
+    const syncedSourcesBuffer = []
+    const depleted = []
     // get one log from every log source
-    
-    let latestLogs = await Promise.all(logSources.map((logSource) => logSource.popAsync()));
 
-    while (latestLogs.some(l => !!l)) {
-      latestLogs.forEach((log, idx) => {
-        if (syncedSources[idx]) {
-          syncedSources[idx].push(log);
-        } else {
-          syncedSources[idx] = [log]
-        }
-      })
-      const logs = await Promise.all(logSources.map((logSource) => logSource.popAsync()))
-      latestLogs = logs
+    let latestLogs = await Promise.all(logSources.map((logSource) => logSource.popAsync()));
+    const loadBuffer = async () => {
+      // buffer size
+      let count = 10
+
+      while (latestLogs.some(l => !!l || count > 0)) {
+        latestLogs.forEach((log, idx) => {
+          if (!log) {
+            depleted[idx] = true
+            return;
+          };
+          if (syncedSourcesBuffer[idx]) {
+            syncedSourcesBuffer[idx].push(log);
+          } else {
+            syncedSourcesBuffer[idx] = [log]
+          }
+        })
+        const logs = await Promise.all(logSources.map((logSource) => logSource.popAsync()))
+        latestLogs = logs
+        count -= 1
+      }
     }
 
-    syncedSources.forEach((logSource, idx) => {
+    await loadBuffer()
+
+    // get one log from every log source from the buffer
+    syncedSourcesBuffer.forEach((logSource, idx) => {
       const log = logSource.shift()
       heapifyItem({ logSourceIdx: idx, log });
     });
@@ -85,11 +98,15 @@ module.exports = (logSources, printer) => {
       const { logSourceIdx, log } = min;
       // console.log(minHeap.length)
       printer.print(log);
-      const logSource = syncedSources[logSourceIdx];
-      const newLog = await logSource.shift()
+      const logSource = syncedSourcesBuffer[logSourceIdx];
 
-       heapifyItem({ logSourceIdx, log: newLog });
-      
+      // if the buffered logSource is about to get depleted, load the buffer
+      if (logSource.length === 1 && !depleted[logSourceIdx]){
+        await loadBuffer()
+      }
+
+      const newLog = logSource.shift()
+      heapifyItem({ logSourceIdx, log: newLog });
     }
 
     printer.done()
